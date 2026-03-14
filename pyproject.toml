@@ -5,7 +5,6 @@ description = "Convert a folder of text files + contents.yaml into an EPUB ebook
 readme = "README.md"  # optional
 requires-python = ">=3.8"
 license = {text = "MIT"}
-# authors = [...]     # optional
 
 dependencies = [
     "ebooklib >= 0.18",
@@ -16,6 +15,5 @@ dependencies = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# This is the key part that fixes the error
 [tool.hatch.build.targets.wheel]
 include = ["txt2epub.py"]
