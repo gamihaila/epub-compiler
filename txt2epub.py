@@ -18,14 +18,22 @@ import datetime
 import yaml
 
 from ebooklib import epub
+from curly_quotes import convert_quotes
 
 
 def natural_sort_key(s: str) -> tuple:
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)]
 
 
-def clean_text_to_html(text: str) -> str:
-    """Very basic txt → HTML paragraphs"""
+def clean_text_to_html(text: str, chapter_id: str = "") -> tuple:
+    """Convert txt → HTML paragraphs, extracting inline footnotes.
+
+    Inline footnotes use the syntax: [^ footnote text here]
+    They are auto-numbered in order of appearance.
+
+    Returns (html, footnotes_list) where footnotes_list is a list of
+    (number, text) tuples. The list is empty if no footnotes were found.
+    """
     lines = [line.rstrip() for line in text.splitlines()]
     paragraphs = []
     current = []
@@ -42,7 +50,53 @@ def clean_text_to_html(text: str) -> str:
         paragraphs.append(" ".join(current).strip())
 
     html = "\n".join(f"<p>{p}</p>" for p in paragraphs if p)
-    return html or "<p>(empty chapter)</p>"
+
+    # Extract inline footnotes [^ ...] and replace with auto-numbered superscripts
+    footnotes = []
+    counter = [0]  # mutable for closure
+
+    def replace_footnote(m):
+        counter[0] += 1
+        n = counter[0]
+        footnotes.append((n, m.group(1).strip()))
+        return (f'<sup><a id="fnref-{chapter_id}-{n}" '
+                f'href="endnotes.xhtml#fn-{chapter_id}-{n}" '
+                f'epub:type="noteref">[{n}]</a></sup>')
+
+    if chapter_id:
+        html = re.sub(r'\[\^\s*(.+?)\s*\]', replace_footnote, html)
+
+    return (html or "<p>(empty chapter)</p>"), footnotes
+
+
+def build_endnotes_page(all_footnotes: list, lang: str) -> epub.EpubHtml:
+    """Build a single endnotes page from all chapters' footnotes.
+
+    all_footnotes: list of (chapter_id, chapter_title, chapter_file, [(num, text)])
+    """
+    body_parts = ['<h1>Notes</h1>']
+    for chapter_id, chapter_title, chapter_file, notes in all_footnotes:
+        body_parts.append(f'<h2>{chapter_title}</h2>')
+        for n, text in notes:
+            body_parts.append(
+                f'<aside class="endnote" id="fn-{chapter_id}-{n}" epub:type="footnote">'
+                f'<p><a href="{chapter_file}#fnref-{chapter_id}-{n}">[{n}]</a> '
+                f'{text}</p></aside>'
+            )
+
+    endnotes = epub.EpubHtml(title="Notes", file_name="content/endnotes.xhtml", lang=lang)
+    endnotes.content = f"""<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="{lang}">
+<head>
+    <meta charset="utf-8" />
+    <title>Notes</title>
+</head>
+<body>
+{"".join(body_parts)}
+</body>
+</html>""".encode("utf-8")
+    return endnotes
 
 
 def main():
@@ -101,6 +155,7 @@ def main():
     # ── Load chapters ────────────────────────────────────────────────────────────
     chapters = []
     toc_links = []
+    all_footnotes = []
 
     if use_config:
         chapter_list = config.get("chapters", [])
@@ -122,18 +177,24 @@ def main():
                 continue
 
             with open(txt_path, encoding="utf-8") as f:
-                content = f.read()
-
-            body_html = clean_text_to_html(content)
+                content = convert_quotes(f.read())
 
             # Sanitized filename for EPUB
             safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', Path(filename).stem)
             epub_filename = f"content/{safe_name}.xhtml"
+            chapter_id = f"chap_{len(chapters) + 1}"
+
+            body_html, footnotes = clean_text_to_html(content, chapter_id)
+
+            if footnotes:
+                all_footnotes.append((chapter_id, chap_title, f"{safe_name}.xhtml", footnotes))
+
+            xmlns_epub = ' xmlns:epub="http://www.idpf.org/2007/ops"' if footnotes else ''
 
             chapter = epub.EpubHtml(title=chap_title, file_name=epub_filename, lang=lang)
             chapter.content = f"""<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" lang="{lang}">
+<html xmlns="http://www.w3.org/1999/xhtml"{xmlns_epub} lang="{lang}">
 <head>
     <meta charset="utf-8" />
     <title>{chap_title}</title>
@@ -146,7 +207,7 @@ def main():
 
             book.add_item(chapter)
             chapters.append(chapter)
-            toc_links.append(epub.Link(epub_filename, chap_title, f"chap_{len(chapters)}"))
+            toc_links.append(epub.Link(epub_filename, chap_title, chapter_id))
 
     else:
         # Fallback: sorted chapter_*.txt
@@ -161,17 +222,23 @@ def main():
 
         for i, txt_path in enumerate(txt_files, 1):
             with open(txt_path, encoding="utf-8") as f:
-                content = f.read()
+                content = convert_quotes(f.read())
 
             chap_title = f"Chapter {i}"
-            body_html = clean_text_to_html(content)
-
             epub_filename = f"content/chapter_{i}.xhtml"
+            chapter_id = f"chap_{i}"
+
+            body_html, footnotes = clean_text_to_html(content, chapter_id)
+
+            if footnotes:
+                all_footnotes.append((chapter_id, chap_title, f"chapter_{i}.xhtml", footnotes))
+
+            xmlns_epub = ' xmlns:epub="http://www.idpf.org/2007/ops"' if footnotes else ''
 
             chapter = epub.EpubHtml(title=chap_title, file_name=epub_filename, lang=lang)
             chapter.content = f"""<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" lang="{lang}">
+<html xmlns="http://www.w3.org/1999/xhtml"{xmlns_epub} lang="{lang}">
 <head>
     <meta charset="utf-8" />
     <title>{chap_title}</title>
@@ -184,7 +251,14 @@ def main():
 
             book.add_item(chapter)
             chapters.append(chapter)
-            toc_links.append(epub.Link(epub_filename, chap_title, f"chap_{i}"))
+            toc_links.append(epub.Link(epub_filename, chap_title, chapter_id))
+
+    # ── Endnotes page ───────────────────────────────────────────────────────────
+    if all_footnotes:
+        endnotes_chapter = build_endnotes_page(all_footnotes, lang)
+        book.add_item(endnotes_chapter)
+        chapters.append(endnotes_chapter)
+        toc_links.append(epub.Link("content/endnotes.xhtml", "Notes", "endnotes"))
 
     # ── Finalize book ────────────────────────────────────────────────────────────
     book.toc = tuple(toc_links)
@@ -198,6 +272,8 @@ def main():
     body { margin: 5%; font-family: Georgia, serif; line-height: 1.6; }
     h1 { text-align: center; margin: 1.5em 0; }
     p { margin: 1em 0; text-indent: 1.2em; }
+    sup a { text-decoration: none; color: #0066cc; }
+    .endnote { margin: 0.5em 0; text-indent: 0; }
     """
     nav_css = epub.EpubItem(
         uid="style_nav",
