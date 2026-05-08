@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
-Converts ASCII double quotes (") to Unicode curly quotes (" and ")
-in a text file. The first quote opens a section, the next closes it,
-alternating from there.
+Converts ASCII quotes to Unicode curly quotes in text.
+
+Double quotes " → " / "
+Single quotes ' → ' / '  (apostrophes are handled contextually)
+
+A quote is treated as opening when preceded by whitespace, a newline, an opening
+bracket/paren, or the start of the string.  All other positions are treated as
+closing (including apostrophes in contractions like "it's").
 
 Usage:
     python curly_quotes.py <input_file> [output_file]
@@ -10,24 +15,32 @@ Usage:
 If no output file is specified, the result is printed to stdout.
 """
 
+import re
 import sys
 
 
-OPEN_QUOTE = "\u201C"   # "
-CLOSE_QUOTE = "\u201D"  # "
+# Unicode curly quote characters
+OPEN_DOUBLE  = "“"   # "
+CLOSE_DOUBLE = "”"   # "
+OPEN_SINGLE  = "‘"   # '
+CLOSE_SINGLE = "’"   # '
+
+# Positions that indicate an *opening* quote: start-of-string, whitespace,
+# opening punctuation, or a newline immediately before the quote character.
+_OPEN_CONTEXT = re.compile(r'(?:^|[\s(\[{])\Z')
 
 
 def convert_quotes(text: str) -> str:
     result = []
-    opening = True  # First quote is always an open quote
-
-    for char in text:
-        if char == '"':
-            result.append(OPEN_QUOTE if opening else CLOSE_QUOTE)
-            opening = not opening
+    for i, char in enumerate(text):
+        if char in ('"', "'"):
+            preceding = text[:i]
+            if _OPEN_CONTEXT.search(preceding):
+                result.append(OPEN_DOUBLE if char == '"' else OPEN_SINGLE)
+            else:
+                result.append(CLOSE_DOUBLE if char == '"' else CLOSE_SINGLE)
         else:
             result.append(char)
-
     return "".join(result)
 
 
