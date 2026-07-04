@@ -25,15 +25,24 @@ def natural_sort_key(s: str) -> tuple:
 
 
 def clean_text_to_html(text: str, chapter_id: str = "") -> tuple:
-    """Convert txt → HTML paragraphs, handling inline footnotes.
+    """Convert txt → HTML paragraphs, handling markdown footnotes.
 
-    Inline footnotes use the syntax: [^ footnote text here]
-    They are auto-numbered in order of appearance and placed at the
-    bottom of the chapter as <aside epub:type="footnote"> elements.
+    Footnotes use standard markdown syntax: [^n] inline references with
+    [^n]: definition text at the end of the file.
 
     Returns (html, has_footnotes) where has_footnotes is a bool.
     """
-    lines = [line.rstrip() for line in text.splitlines()]
+    # Extract footnote definitions ([^label]: text) from end of file
+    footnote_defs = {}
+    body_lines = []
+    for line in text.splitlines():
+        m = re.match(r'^\[\^(\w+)\]:\s*(.+)$', line)
+        if m:
+            footnote_defs[m.group(1)] = m.group(2).strip()
+        else:
+            body_lines.append(line.rstrip())
+
+    lines = body_lines
     paragraphs = []
     current = []
 
@@ -50,29 +59,36 @@ def clean_text_to_html(text: str, chapter_id: str = "") -> tuple:
 
     html = "\n".join(f"<p>{p}</p>" for p in paragraphs if p)
 
-    # Extract inline footnotes [^ ...] and replace with auto-numbered superscripts
+    # Replace inline footnote references [^label] with numbered superscripts
     footnotes = []
-    counter = [0]  # mutable for closure
+    seen_labels = {}
+    counter = [0]
 
     def replace_footnote(m):
-        counter[0] += 1
-        n = counter[0]
-        footnotes.append((n, m.group(1).strip()))
+        label = m.group(1)
+        if label in seen_labels:
+            n = seen_labels[label]
+        else:
+            counter[0] += 1
+            n = counter[0]
+            seen_labels[label] = n
+            fn_text = footnote_defs.get(label, f"[missing footnote: {label}]")
+            footnotes.append((n, fn_text))
         return (f'<sup><a id="fnref-{chapter_id}-{n}" '
                 f'href="#fn-{chapter_id}-{n}" '
                 f'epub:type="noteref">[{n}]</a></sup>')
 
     if chapter_id:
-        html = re.sub(r'\[\^\s*(.+?)\s*\]', replace_footnote, html)
+        html = re.sub(r'\[\^(\w+)\]', replace_footnote, html)
 
     # Append footnote asides at the bottom of the chapter
     if footnotes:
         footnote_parts = []
-        for n, text in footnotes:
+        for n, fn_text in footnotes:
             footnote_parts.append(
                 f'<aside class="endnote" id="fn-{chapter_id}-{n}" epub:type="footnote">'
                 f'<p><a href="#fnref-{chapter_id}-{n}">[{n}]</a> '
-                f'{text}</p></aside>'
+                f'{fn_text}</p></aside>'
             )
         html += "\n" + "\n".join(footnote_parts)
 
