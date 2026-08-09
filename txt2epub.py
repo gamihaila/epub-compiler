@@ -26,11 +26,58 @@ def natural_sort_key(s: str) -> list:
     return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)]
 
 
-def clean_text_to_html(text: str, chapter_id: str = "") -> tuple:
-    """Convert txt → HTML paragraphs, handling inline footnotes.
+# Markdown-style footnote definition: "[^label]: text", optionally continued on
+# following indented lines.
+FOOTNOTE_DEF_RE = re.compile(r'^\[\^([^\]\s]+)\]:[ \t]*(.*)$')
 
-    Inline footnotes use the syntax: [^ footnote text here]
-    They are auto-numbered in order of appearance and placed at the
+# Footnote marker. Group 1 is the whitespace after '^': present for the inline
+# form "[^ text]", absent for a Markdown reference "[^label]".
+FOOTNOTE_REF_RE = re.compile(r'\[\^(\s*)([^\]]+?)\s*\]')
+
+
+def extract_footnote_defs(lines: list) -> tuple:
+    """Pull Markdown footnote definitions out of the body lines.
+
+    Returns (body_lines, definitions) where definitions maps label → text.
+    """
+    body = []
+    definitions = {}
+    label = None
+
+    for line in lines:
+        m = FOOTNOTE_DEF_RE.match(line)
+        if m:
+            label = m.group(1)
+            definitions[label] = m.group(2).strip()
+            continue
+
+        if label is not None:
+            if not line.strip():
+                # Blank line: a definition may still continue on an indented line.
+                body.append(line)
+                continue
+            if line[:1] in (" ", "\t"):
+                definitions[label] = f"{definitions[label]} {line.strip()}".strip()
+                continue
+            label = None
+
+        body.append(line)
+
+    return body, definitions
+
+
+def clean_text_to_html(text: str, chapter_id: str = "") -> tuple:
+    """Convert txt → HTML paragraphs, handling footnotes.
+
+    Two footnote syntaxes are supported:
+
+      * Markdown reference style — "[^label]" in the prose plus a
+        "[^label]: footnote text" definition line (usually at the bottom of
+        the file). Definition lines are removed from the body.
+      * Inline style — "[^ footnote text here]", where the space after '^'
+        marks the content as the note itself rather than a label.
+
+    Footnotes are numbered in order of first reference and placed at the
     bottom of the chapter as <aside epub:type="footnote"> elements.
 
     Footnote text cannot contain ']' characters.
@@ -38,6 +85,11 @@ def clean_text_to_html(text: str, chapter_id: str = "") -> tuple:
     Returns (html_str, has_footnotes) where has_footnotes is a bool.
     """
     lines = [line.rstrip() for line in text.splitlines()]
+
+    definitions = {}
+    if chapter_id:
+        lines, definitions = extract_footnote_defs(lines)
+
     paragraphs = []
     current = []
 
@@ -54,22 +106,45 @@ def clean_text_to_html(text: str, chapter_id: str = "") -> tuple:
 
     html_str = "\n".join(f"<p>{html.escape(p)}</p>" for p in paragraphs if p)
 
-    # Extract inline footnotes [^ ...] and replace with auto-numbered superscripts.
-    # Note: footnote text must not contain ']' — the pattern stops at the first ']'.
-    footnotes = []
-    counter = 0
+    # Replace footnote markers with auto-numbered superscripts.
+    # Note: markers must not contain ']' — the pattern stops at the first ']'.
+    footnotes = []       # [(number, escaped_text)] in numbering order
+    numbers = {}         # label → number, so repeat references share a note
+    ref_counts = {}      # label → times referenced, to keep anchor ids unique
 
     def replace_footnote(m):
-        nonlocal counter
-        counter += 1
-        n = counter
-        footnotes.append((n, html.escape(m.group(1).strip())))
-        return (f'<sup><a id="fnref-{chapter_id}-{n}" '
+        is_inline, content = bool(m.group(1)), m.group(2)
+        suffix = ""
+
+        if not is_inline and content in definitions:
+            if content not in numbers:
+                numbers[content] = len(footnotes) + 1
+                footnotes.append((numbers[content], html.escape(definitions[content])))
+            n = numbers[content]
+            ref_counts[content] = ref_counts.get(content, 0) + 1
+            if ref_counts[content] > 1:
+                suffix = f"-{ref_counts[content]}"
+        elif not is_inline:
+            print(f"Warning: footnote [^{content}] in {chapter_id} has no "
+                  f"'[^{content}]: ...' definition; left as-is", file=sys.stderr)
+            return m.group(0)
+        else:
+            # Inline note: the text is the marker content, already escaped
+            # along with its paragraph.
+            n = len(footnotes) + 1
+            footnotes.append((n, content))
+
+        return (f'<sup><a id="fnref-{chapter_id}-{n}{suffix}" '
                 f'href="#fn-{chapter_id}-{n}" '
-                f'epub:type="noteref">[{n}]</a></sup>')
+                f'epub:type="noteref">{n}</a></sup>')
 
     if chapter_id:
-        html_str = re.sub(r'\[\^\s*([^\]]+?)\s*\]', replace_footnote, html_str)
+        html_str = FOOTNOTE_REF_RE.sub(replace_footnote, html_str)
+
+    for label in definitions:
+        if label not in numbers:
+            print(f"Warning: footnote definition [^{label}]: in {chapter_id} "
+                  f"is never referenced; dropped", file=sys.stderr)
 
     # Append footnote asides at the bottom of the chapter
     if footnotes:
@@ -77,7 +152,7 @@ def clean_text_to_html(text: str, chapter_id: str = "") -> tuple:
         for n, text in footnotes:
             footnote_parts.append(
                 f'<aside class="endnote" id="fn-{chapter_id}-{n}" epub:type="footnote">'
-                f'<p><a href="#fnref-{chapter_id}-{n}">[{n}]</a> '
+                f'<p><a href="#fnref-{chapter_id}-{n}"><sup>{n}</sup></a> '
                 f'{text}</p></aside>'
             )
         html_str += "\n" + "\n".join(footnote_parts)
